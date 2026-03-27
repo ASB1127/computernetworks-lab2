@@ -9,7 +9,6 @@
 import socket # for UDP connection
 import threading
 import packet
-import queue
 from mrt_common import MRTBase
 from packet_logger import PacketLogger
 
@@ -33,29 +32,11 @@ class Client(MRTBase):
         self.sock.bind(("", src_port))
         self.sock.settimeout(0.2)
 
-        # Connection state and signaling.
         self.state = "CLOSED"
         self.connected_event = threading.Event()   
         self.closed_event = threading.Event()
-
-        # Sender synchronization and buffers.
-        self.send_lock = threading.Lock()
-        self.send_queue = queue.Queue()
-        self.outbound_buffer = bytearray()
-        self.unacked = {}
-
-        # Sender sequence / flow-control state.
-        self.buffer_start_seq = 0
-        self.next_start_seq = 0
-        self.oldest_unacked_seq = 0
-        self.next_seq_num = 0
-        self.server_window = 0
-
-        # Sender timer state.
-        self.timeout_interval = 0.2
-        self.oldest_unacked_send_time = None
-
         self.logger = PacketLogger(f"client_log_{self.src_port}.txt")
+             
         self.segment_size = segment_size
         
         self.t_recv = threading.Thread(
@@ -63,35 +44,6 @@ class Client(MRTBase):
             daemon=False,
         )
         self.t_recv.start()
-        
-    def retire_acked_packets(self, ack_num):
-        while self.unacked:
-            first_seq = next(iter(self.unacked))
-            first_pkt = self.unacked[first_seq]
-            first_end_seq = first_seq + len(first_pkt.data)
-
-            if first_end_seq > ack_num:
-                break
-
-            del self.unacked[first_seq]
-
-
-    def handle_established_ack(self, pkt):
-        with self.send_lock:
-            self.server_window = max(0, pkt.rwnd)
-
-            if pkt.ackNum <= self.oldest_unacked_seq:
-                return
-
-            self.oldest_unacked_seq = pkt.ackNum
-            self.retire_acked_packets(pkt.ackNum)
-
-            bytes_to_trim = self.oldest_unacked_seq - self.buffer_start_seq
-            if bytes_to_trim > 0:
-                del self.outbound_buffer[:bytes_to_trim]
-                self.buffer_start_seq = self.oldest_unacked_seq
-                
-
         
     def rcv_and_sgmnt_handler(self):
         while True:
@@ -120,8 +72,6 @@ class Client(MRTBase):
                 self._send_packet(ack_packet)
                 #logging send packet
                 self.logger.log_send(ack_packet)
-                #setting the server window
-                self.server_window = pkt.rwnd
                 #setting connection state
                 self.state = "ESTABLISHED"
                 self.connected_event.set()
@@ -139,12 +89,6 @@ class Client(MRTBase):
                 self.state = "CLOSED"
                 self.closed_event.set()
                 break
-            
-            if raw_packet is not None and self.state == "ESTABLISHED":
-                if pkt.type == packet.Packet.ACK:
-                    self.handle_established_ack(pkt)
-                
-                
                 
 
     def connect(self):
@@ -174,30 +118,7 @@ class Client(MRTBase):
         arguments:
         data -- the bytes to be sent to the server
         """
-        if self.state != "ESTABLISHED":
-            raise RuntimeError("connection is not established")
-
-        if not data:
-            return 0
-
-        done = threading.Event()
-
-        with self.send_lock:
-            start_seq = self.next_start_seq
-            end_seq = start_seq + len(data)
-            self.next_start_seq = end_seq
-
-            request = {
-                "data": data,
-                "start_seq": start_seq,
-                "end_seq": end_seq,
-                "done": done,
-            }
-
-        self.send_queue.put(request)
-
-        done.wait()
-        return len(data)
+        pass
 
     def close(self):
         """
